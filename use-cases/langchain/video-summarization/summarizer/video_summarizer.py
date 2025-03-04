@@ -116,10 +116,7 @@ if __name__ == '__main__':
 
     # Loop through docs and generate chunk summaries    
     chunk_summaries = {}
-    cnt = 0
     for doc in loader.lazy_load():
-        if cnt == 1:
-            break
         
         # Log metadata
         output_handler(str(f"Chunk Metadata: {doc.metadata}"),
@@ -138,7 +135,7 @@ if __name__ == '__main__':
         chunk_summaries[Path(doc.metadata['chunk_path']).stem] = f"Start time: {doc.metadata['start_time']} End time: {doc.metadata['end_time']}\n" + output
         output_handler("\nChunk Inference time: {} sec\n".format(time.time() - chunk_st_time), filename=args.outfile,
                        mode='a')
-        cnt += 1
+        
     # Summarize the full video, using the subsections summaries from each chunk    
     overall_summ_st_time = time.time()
     
