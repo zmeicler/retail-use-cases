@@ -46,12 +46,12 @@ else
 	
 fi
 
-# Create python enviornment
+# Create python environment
 conda create -n ovlangvidsumm python=3.10 -y
 conda activate ovlangvidsumm
 echo 'y' | conda install pip
 
-pip install optimum-intel@git+https://github.com/huggingface/optimum-intel.git nncf openvino-genai timm einops decord
+pip install -r requirements.txt
 git clone https://github.com/gsilva2016/langchain.git
 pushd langchain; git checkout openvino_tts_tool; popd
 pip install -e langchain/libs/community

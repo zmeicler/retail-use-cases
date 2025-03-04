@@ -1,0 +1,9 @@
+optimum-intel@git+https://github.com/huggingface/optimum-intel.git
+nncf
+openvino-genai
+timm
+einops
+decord
+fastapi
+uvicorn
+requests
