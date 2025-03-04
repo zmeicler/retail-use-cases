@@ -7,3 +7,4 @@ decord
 fastapi
 uvicorn
 requests
+google-cloud-aiplatform

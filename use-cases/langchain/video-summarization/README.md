@@ -1,6 +1,16 @@
 # Summarize Videos Using OpenVINO-GenAI, Langchain, and MiniCPM-V-2_6
 
 ## Installation
+Follow [link](https://cloud.google.com/sdk/docs/install) to create google cloud account and install gcloud 
+
+Next, login and authenticate your account
+```
+# Initialize gcloud and create login credentials. Tip: Save path to .json credential file.
+gcloud init
+
+# Use credentials to login and authorize account
+gcloud auth application-default login 
+```
 
 Install Intel Client GPU, Conda, and Set Up Python Environment
 
@@ -42,18 +52,3 @@ Note: if the demo has already been run, you can use the following command to ski
 ```
 ./run-demo.sh --skip
 ```
-
-
-
-################### NEED TO SORT: vertexai install stuff
-# Install gcloud
-https://cloud.google.com/sdk/docs/install
-
-# Login and authenticate (To do: dermine how to install via vertex) 
-gcloud init (follow log in)
-gcloud auth application-default login (credentials saved at C:\Users\zmeicler\AppData\Roaming\gcloud\application_default_credentials.json])
-
-# Create conda env
-conda create -n vertex python=3.10 -y
-conda activate vertex
-pip install --upgrade google-cloud-aiplatform
