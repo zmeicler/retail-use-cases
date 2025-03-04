@@ -69,9 +69,11 @@ if __name__ == '__main__':
                         help="Desired spatial resolution of input video if different than original. Width x Height")
     parser.add_argument("-o", "--outfile", type=str,
                         help="File to write generated text.", default='')
+    parser.add_argument("-e", "--extend_to_vertex", action="store_true", help='Extend pipeline to vertexai to analayze anomalous videos.')
     parser.add_argument("-a", "--anomaly_thresh", type=float, default=0.7,
-                        help="If pipeline has been extended to the cloud, set a threshold to determine if video is anamolous and shoul be evaluated by cloud model.")
-    parser.add_argument("-e", "--extend_to_vertex", action="store_true", help='Use vertex ai to analayze anomalous videos.')
+                        help="If pipeline has been extended to the cloud, set a threshold to determine if video is anomalous and should be reevaluated by cloud model.")
+    parser.add_argument("-m", "--cloud_model", type=str, default="gemini-2.0-flash-exp",
+                        help="Name of google model to use if the pipeline has been extended to the cloud.")
     
     tot_st_time = time.time()
     args = parser.parse_args()
@@ -98,8 +100,7 @@ if __name__ == '__main__':
 
     # Initialize cloud model
     if args.extend_to_vertex:
-        cloud_model_name = "gemini-2.0-flash-exp"
-        cloud_model = VertexWrapper(cloud_model_name)
+        cloud_model = VertexWrapper(args.cloud_model)
     
     # Initialize video chunk loader
     loader = VideoChunkLoader(
@@ -117,8 +118,9 @@ if __name__ == '__main__':
     chunk_summaries = {}
     cnt = 0
     for doc in loader.lazy_load():
-        # if cnt == 1:
-        #     break
+        if cnt == 1:
+            break
+        
         # Log metadata
         output_handler(str(f"Chunk Metadata: {doc.metadata}"),
                        filename=args.outfile, mode='a')
@@ -166,6 +168,7 @@ if __name__ == '__main__':
     output_handler("\nOverall video summary inference time: {} sec\n".format(time.time() - overall_summ_st_time),
                    filename=args.outfile, mode="a")
 
+    
     # 2. pass existing minicpm based chain, this does not use the FastAPI route and calls the class functions directly
     # summary_merger = SummaryMerger(chain=chain, device="GPU")
     # ret = summary_merger.merge_summaries(chunk_summaries)
