@@ -80,7 +80,7 @@ if __name__ == '__main__':
     if not os.path.exists(args.video_file):
         print(f"{args.video_file} does not exist.")
         exit()
-
+            
     # Create template for inputs
     prompt = PromptTemplate(
         input_variables=["video", "question"],
@@ -150,8 +150,8 @@ if __name__ == '__main__':
 
         if args.extend_to_vertex and res['anomaly_score'] >= args.anomaly_thresh:
             cloud_st_time = time.time()
-            cloud_prompt = 'Please determine if this video is anomalous given the following summary: {}'.format(res['overall_summary'])
-            cloud_response = cloud_model.generate(cloud_prompt)
+            cloud_prompt = args.prompt + "In addition, please provide a score between 0 and 1, representing how suspicious the behavior in this video is."
+            cloud_response = cloud_model.generate(cloud_prompt, video_path=args.video_file)
             output_handler("\n--Vertex AI Evaluation--\n", 
                            filename=args.outfile,
                            mode='a')                                      
@@ -160,11 +160,10 @@ if __name__ == '__main__':
                            mode='a')                          
             output_handler("\nVertex Inference time: {} sec\n".format(time.time() - cloud_st_time),
                            filename=args.outfile,
-                           mode='a')
-            
+                           mode='a')            
+    cloud_model.cleanup()            
     output_handler("\nOverall video summary inference time: {} sec\n".format(time.time() - overall_summ_st_time),
                    filename=args.outfile, mode="a")
-
     
     # 2. pass existing minicpm based chain, this does not use the FastAPI route and calls the class functions directly
     # summary_merger = SummaryMerger(chain=chain, device="GPU")
