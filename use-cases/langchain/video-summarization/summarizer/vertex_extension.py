@@ -1,9 +1,11 @@
 import os
 import vertexai
 from vertexai.generative_models import GenerativeModel, Part
+
+from google.oauth2 import service_account
 from google.cloud import storage
 import uuid
-
+    
 def generate_unique_bucket_name(prefix="sample-vidsumm-bucket"):
     bucket_id = uuid.uuid4().hex
     return f"{prefix}-{bucket_id}"
@@ -28,11 +30,14 @@ def create_gc_bucket(bucket_name, location="US"):
     return bucket.name
 
 class VertexWrapper(object):
-    def __init__(self, model_name, bucket_name=None):
+    def __init__(self, model_name, bucket_name=None, gcloud_key=None):
+        # Authenticate account (Maybe to do: authenticate in python)
+        # self.credentials = service_account.Credentials.from_service_account_file(gcloud_key)
+        
         # Load Model
         self.model_name = model_name
-        self.model =  GenerativeModel(model_name)
-
+        self.model = GenerativeModel(model_name)
+        
         # Set up gc storage bucket
         available_buckets = [b.name for b in storage.Client().list_buckets()]
         if len(available_buckets) == 0 and not bucket_name:
@@ -45,19 +50,17 @@ class VertexWrapper(object):
         else:
             self.bucket_name = create_gc_bucket(bucket_name)
             
-    def generate(self, text_prompt, video_path=None):
-        if video_path:
-            video_url = upload_to_gcs(video_path, self.bucket_name,
+    def generate(self, text_prompt, video_paths=None):
+        if video_paths:
+            parts = [text_prompt]
+            for video_path in video_paths:
+                video_url = upload_to_gcs(video_path, self.bucket_name,
                                 os.path.join("tmp/{}".format(os.path.basename(video_path))))
-            response = self.model.generate_content(
-                [
-                    Part.from_uri(uri=video_url, mime_type="video/mp4"),
-                    text_prompt, 
-                ]
-            )        
+                parts.append(Part.from_uri(uri=video_url, mime_type="video/mp4"))
+            response = self.model.generate_content(parts)
         else:
             response = self.model.generate_content(text_prompt)
-        return response
+        return response.text
 
     def cleanup(self):
         client = storage.Client()
