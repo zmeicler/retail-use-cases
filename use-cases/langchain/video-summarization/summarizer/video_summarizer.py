@@ -3,6 +3,8 @@ import ast
 import os
 import sys
 import time
+import json
+from itertools import tee
 from concurrent.futures.thread import ThreadPoolExecutor
 from pathlib import Path
 
@@ -16,19 +18,6 @@ from vertex_extension import VertexWrapper
 
 os.environ["no_proxy"] = "localhost,127.0.0.1"
 
-def output_handler(text: str,
-                   filename: str = '',
-                   mode: str = 'w',
-                   verbose: bool = True):
-    # Print to terminal
-    if verbose:
-        print(text)
-
-    # Write to file, if requested
-    if filename != '':
-        with open(filename, mode) as FH:
-            print(text, file=FH)
-
 def post_request(input_data):
     formatted_req = {
         "summaries": input_data
@@ -36,30 +25,20 @@ def post_request(input_data):
     response = requests.post(url="http://127.0.0.1:8000/merge_summaries", json=formatted_req)
     return response.content
 
-def call_merger(chunk_summaries, chain=None):
-    if not chain:
-        with ThreadPoolExecutor() as pool:
-            future = pool.submit(post_request, chunk_summaries)
-            res = ast.literal_eval(future.result().decode("utf-8"))
-    else:
-        summary_merger = SummaryMerger(chain=chain, device="GPU")
-        res = summary_merger.merge_summaries(chunk_summaries)
-    print(f"Overall Summary: {res['overall_summary']}")
-    print(f"Anomaly Score: {res['anomaly_score']}")        
-    return res
+def tag_last(generator):
+    # Create two independent iterators from the original generator    
+    gen1, gen2 = tee(generator)
 
-def call_vertex(prompt, videos=[]):
-    cloud_st_time = time.time()
-    cloud_response = cloud_model.generate(prompt, video_paths=videos)
-    output_handler(cloud_response, 
-                   filename=args.outfile,
-                   mode='a')                          
-    output_handler("\nVertex Inference time: {} sec\n".format(time.time() - cloud_st_time),
-                   filename=args.outfile,
-                   mode='a')    
-    cloud_model.cleanup()
-    return cloud_response
+    # Advance gen2 by one step to look ahead at the next item    
+    next(gen2, None)
 
+    # Iterate through both simultaneously
+    for current, next_item in zip(gen1, gen2):
+        yield current, False
+
+    # Exit when next_item is the last item, and yield it with True        
+    yield next_item, True
+    
 if __name__ == '__main__':
     # Parse inputs
     parser_txt = "Generate video summarization using LangChain, OpenVINO-genai, and MiniCPM-V-2_6."
@@ -98,7 +77,7 @@ if __name__ == '__main__':
     parser.add_argument("-m", "--cloud_model", type=str, default="gemini-2.0-flash-exp",
                         help="Name of google model to use if the pipeline has been extended to the cloud.")
     
-    tot_st_time = time.time()
+    init_st_time = time.time()
     args = parser.parse_args()
     if not os.path.exists(args.video_file):
         print(f"{args.video_file} does not exist.")
@@ -124,8 +103,7 @@ if __name__ == '__main__':
     # Initialize cloud model
     if args.extend_to_vertex:
         cloud_model = VertexWrapper(args.cloud_model)
-        merge_prompt = args.prompt + 'Please analyze all attached videos as if they were combined into a single video. In addition, the last information produced must be a score between 0 and 1 to represent how suspicious the the video is. The score should be a float rounded to the tenth decimal and formatted as the following example: \n **anomaly score**: 0.0'
-        validation_prompt = "Please determine if the following summaries agree. The summaries will be separated by the delimiter: <>. The last thing produced must be a value of either 0 (the summaries do not agree) or 1 (the summaries do agree). It should be formatted as the following example: **Validation Score**: 1\n"
+        cloud_prompt = args.prompt + 'Please analyze all attached videos as if they were combined into a single video. In addition, the last information produced must be a score between 0 and 1 to represent how suspicious the the video is. The score should be a float rounded to the tenth decimal and formatted as the following example: \n **anomaly score**: 0.0'
         
     # Initialize video chunk loader
     loader = VideoChunkLoader(
@@ -134,80 +112,68 @@ if __name__ == '__main__':
         chunk_duration=args.chunk_duration,
         chunk_overlap=args.chunk_overlap)
 
-    # Define cadence at which we'll merge chunk summaries
+    # Define cadence at which we'll merge chunk summaries. 
     merge_cadence = max(1, int(args.merge_cadence / args.chunk_duration)) if \
-        args.merge_cadence else None
-    
-    # Start log
-    output_handler("python " + " ".join(sys.argv),
-                   filename=args.outfile, mode='w',
-                   verbose=False)
-        
+        args.merge_cadence else float('inf')
+    print("\nInitialization Time: {} sec\n".format(time.time() - init_st_time))
+            
     # Loop through docs and generate chunk summaries
+    mode = "w"    
     chunk_summaries = {}
+    merge_start_time = 0    
     last_chunk_processed = 0
-    for doc in loader.lazy_load():
+    tot_inf_st_time = time.time()
+    for doc, is_last in tag_last(loader.lazy_load()):
         
-        # Generate chunk summaries
+        # Generate chunk summary
         chunk_st_time = time.time()
         video_name = Path(doc.metadata['chunk_path'])
         inputs = {"video": video_name, "question": args.prompt}
         output = chain.invoke(inputs)
         chunk_summaries[Path(doc.metadata['chunk_path']).stem] = f"Start time: {doc.metadata['start_time']} End time: {doc.metadata['end_time']}\n" + output
-
-        # Log output
-        output_handler("\nChunk Inference time: {} sec\n".format(time.time() - chunk_st_time), filename=args.outfile, mode='a')
+        print("Chunk Summary Time: {} sec\n".format(time.time() - chunk_st_time))
         
-        # Merge chunk summaries if asked to do so at a cadence
-        if merge_cadence and (doc.metadata['chunk_id'] + 1) % merge_cadence == 0:
-            merge_res = call_merger(chunk_summaries)
+        # Merge chunk summaries at specified cadence
+        call_merger = (doc.metadata['chunk_id']+1) % merge_cadence == 0
+        if merge_cadence == float('inf') and not is_last:
+            # If we're asked to make a summary of full input video, don't merge yet.
+            continue
+        if call_merger or (not call_merger and is_last):            
+            # Get merged summary and anomoly score
+            merge_st_time = time.time()
+            with ThreadPoolExecutor() as pool:
+                future = pool.submit(post_request, chunk_summaries)
+                merge_res = ast.literal_eval(future.result().decode("utf-8"))
+            print("Merge Chunks Time: {} sec\n".format(time.time() - merge_st_time))
             
             # Extend to cloud, if asked
             if args.extend_to_vertex and merge_res['anomaly_score'] >= args.anomaly_thresh:
-                output_handler(f"\n--Vertex AI Evaluation:{doc.metadata['chunk_id']}--\n",
-                               filename=args.outfile,
-                               mode='a')
-                chunk_ids_to_process = range(max(0, doc.metadata['chunk_id'] - merge_cadence),
+                cloud_st_time = time.time()                
+                chunk_ids_to_process = range(last_chunk_processed,
                                              doc.metadata['chunk_id'] + 1)
-                merged_chunks = [os.path.join(loader.output_dir, "chunk_{}.mp4".format(ch_id))\
-                                 for chidx in chunk_ids_to_process]
-                vertex_summary, vertex_score = call_vertex(merge_prompt,
-                                                           videos=merged_chunks).split("**anomaly score**:")
-                vertex_res = {"overall_summary": vertex_summary, "anomaly_score": float(vertex_score)}
-                                
-                # Call vertex to validate mergeed output                
-                validation_res = call_vertex(validation_prompt + merge_res["overall_summary"] + "<>" + vertex_res["overall_summary"])
-                _, validation_score = validation_res.split("**validation score**:")
-                if int(validation_score) == 0:
-                    merge_res = vertex_res
-                last_chunk_processed = doc.metadata['chunk_id']
+                merged_chunks = [os.path.join(loader.output_dir,
+                                              "chunk_{}.mp4".format(ch_id))\
+                                 for ch_id in chunk_ids_to_process]
+                cloud_response = cloud_model.generate(cloud_prompt,
+                                                      video_paths=merged_chunks)
+                anomaly_score = cloud_model.extract_anomaly_score(cloud_response)
+                merge_res = {'overall_summary': cloud_response,
+                             'anomaly_score': anomaly_score}                
+                cloud_model.cleanup()
+                print("Cloud Summary Time: {} sec\n\n".format(time.time() - cloud_st_time))
+                last_chunk_processed = doc.metadata['chunk_id'] + 1
                 
-    # Process any leftover chunks, if asked
-    if not merge_cadence or ((doc.metadata['chunk_id'] + 1) % merge_cadence != 0):
-        # merge_res = call_merger(chunk_summaries)
-        merge_res = {'anomaly_score': 0.0,
-                     'overall_summary': 'Not suspicious'}
-
-        # Extend to cloud, if asked        
-        if args.extend_to_vertex and merge_res['anomaly_score'] >= args.anomaly_thresh:
-            output_handler(f"\n--Vertex AI Evaluation:{doc.metadata['chunk_id']}--\n",
-                           filename=args.outfile,
-                           mode='a')              
-            chunk_ids_to_process=range(last_chunk_processed + 1,
-                                       doc.metadata['chunk_id'] + 1)
-            merged_chunks=[os.path.join(loader.output_dir, "chunk_{}.mp4".format(ch_id)) for ch_id in chunk_ids_to_process]
-            vertex_summary, vertex_score = call_vertex(merge_prompt,
-                                                       videos=merged_chunks).split("**anomaly score**:")
-            vertex_res = {"overall_summary": vertex_summary, "anomaly_score": float(vertex_score)}
-
-            # Call vertex to validate mergeed output                
-            validation_res = call_vertex(validation_prompt + merge_res["overall_summary"] + "<>" + vertex_res["overall_summary"])
-            _, validation_score = validation_res.split("**validation score**:")
-            if int(validation_score) == 0:
-                merge_res = vertex_res
-            last_chunk_processed = doc.metadata['chunk_id']
-    
+            # Write output to JSON file, if asked
+            if args.outfile:
+                merge_res["start_time"] = merge_start_time
+                merge_res["end_time"] = doc.metadata['end_time']
+                FH = open(args.outfile, mode)
+                json.dump(merge_res, FH, indent=4)
+                FH.write("\n")
+                FH.close()                
+                if mode == "w":
+                    mode = "a"
+            merge_start_time = doc.metadata['end_time'] - args.chunk_overlap
+            
     # Report full inference time
-    output_handler("\nTotal Inference time: {} sec\n".format(time.time() - tot_st_time), filename=args.outfile,
-                   mode='a')
-    output_handler(output, filename=args.outfile, mode='a', verbose=False)
+    print("\nTotal Inference Time: {} sec\n".format(time.time() - tot_inf_st_time))
