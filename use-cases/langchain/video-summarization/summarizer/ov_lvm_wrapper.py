@@ -3,31 +3,77 @@ from typing import List, Optional
 import openvino_genai
 from decord import VideoReader, cpu
 from langchain.llms.base import LLM
-from openvino import Tensor
+from openvino import Tensor as ovTensor
 
+import torch
+from torch import Tensor
+import torch.nn.functional as F
 
 def encode_video(video_path: str,
                  max_num_frames: int = 64,
                  resolution: list = []) -> list:
-    def uniform_sample(l: list, n: int) -> list:
-        gap = len(l) / n
-        idxs = [int(i * gap + gap / 2) for i in range(n)]
-        return [l[i] for i in idxs]
 
+    # Create cross entopy closure functionality
+    def compute_cross_entropy(frames: torch.Tensor) -> torch.Tensor:
+        if frames.shape[0] < 2:
+            return torch.tensor([])  # Return empty tensor if not enough frames
+        
+        frames = frames.float() / 255.0  # Normalize pixel values
+        
+        probs = frames[:-1]  # Previous frame as input
+        targets = frames[1:]  # Next frame as target labels
+        
+        b, h, w, c = probs.shape
+        probs = probs.permute(0, 3, 1, 2)  # Change to (batch, channels, height, width)
+        targets = targets.permute(0, 3, 1, 2)  # Same for targets
+        
+        cross_entropy = F.cross_entropy(probs, targets, reduction='none')
+        return cross_entropy.mean(dim=-1)  # Aggregate per-frame entropy scores
+
+    # Load Video
     if len(resolution) != 0:
         vr = VideoReader(video_path, width=resolution[0],
                          height=resolution[1], ctx=cpu(0))
     else:
         vr = VideoReader(video_path, ctx=cpu(0))
 
-    frame_idx = [i for i in range(0, len(vr), max(1, int(len(vr) / max_num_frames)))]
-    if len(frame_idx) > max_num_frames:
-        frame_idx = uniform_sample(frame_idx, max_num_frames)
-    frames = vr.get_batch(frame_idx).asnumpy()
+    # Calculate cross entropy
+    frames = vr.get_batch(range(len(vr))).asnumpy()
+    frames_tensor = torch.stack([Tensor(v.astype('uint8')) for v in frames])    
+    cross_entropy_scores = compute_cross_entropy(frames_tensor)
 
-    frames = [Tensor(v.astype('uint8')) for v in frames]
-    print('Num frames sampled:', len(frames))
-    return frames
+    # Sample frames
+    num_available_frames = cross_entropy_scores.shape[0]
+    num_frames_to_sample = min(max_num_frames, num_available_frames)    
+    top_entropy_indices = torch.topk(cross_entropy_scores, num_frames_to_sample).indices.sort().values.tolist()        
+    sampled_frames = frames_tensor[top_entropy_indices]
+    
+    print('Num frames sampled:', len(sampled_frames))
+    return [ovTensor(v.numpy().astype('uint8')) for v in sampled_frames]
+    # return [v for v in sampled_frames]
+
+# def encode_video(video_path: str,
+#                  max_num_frames: int = 64,
+#                  resolution: list = []) -> list:
+#     def uniform_sample(l: list, n: int) -> list:
+#         gap = len(l) / n
+#         idxs = [int(i * gap + gap / 2) for i in range(n)]
+#         return [l[i] for i in idxs]
+
+#     if len(resolution) != 0:
+#         vr = VideoReader(video_path, width=resolution[0],
+#                          height=resolution[1], ctx=cpu(0))
+#     else:
+#         vr = VideoReader(video_path, ctx=cpu(0))
+
+#     frame_idx = [i for i in range(0, len(vr), max(1, int(len(vr) / max_num_frames)))]
+#     if len(frame_idx) > max_num_frames:
+#         frame_idx = uniform_sample(frame_idx, max_num_frames)
+#     frames = vr.get_batch(frame_idx).asnumpy()
+
+#     frames = [Tensor(v.astype('uint8')) for v in frames]
+#     print('Num frames sampled:', len(frames))
+#     return frames
 
 
 def streamer(subword: str) -> bool:
