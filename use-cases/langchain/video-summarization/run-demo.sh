@@ -1,15 +1,15 @@
 #!/bin/bash
 
-# source activate-conda.sh
-# activate_conda
-# conda activate ovlangvidsumm
+source activate-conda.sh
+activate_conda
+conda activate ovlangvidsumm
 
-# if [ "$1" == "--skip" ]; then
-# 	echo "Skipping sample video download"
-# else
-#     # Download sample video
-#     wget https://github.com/intel-iot-devkit/sample-videos/raw/master/one-by-one-person-detection.mp4
-# fi
+if [ "$1" == "--skip" ]; then
+	echo "Skipping sample video download"
+else
+    # Download sample video
+    wget https://github.com/intel-iot-devkit/sample-videos/raw/master/one-by-one-person-detection.mp4
+fi
 
 INPUT_FILE="one-by-one-person-detection.mp4"
 DEVICE="GPU"
@@ -28,11 +28,11 @@ Here is a detailed description of the video.
 '
 
 echo "Starting FastAPI app"
-START /B uvicorn api.app:app
+uvicorn api.app:app &
 APP_PID=$!
 
 echo "Running Video Summarizer"
-python summarizer/video_summarizer.py $INPUT_FILE MiniCPM_INT8/ -d $DEVICE -r $RESOLUTION_X $RESOLUTION_Y -p "$PROMPT"
+python summarizer/video_summarizer.py $INPUT_FILE MiniCPM_INT8/ -d $DEVICE -r $RESOLUTION_X $RESOLUTION_Y -p "$PROMPT" -e
 
 # terminate fastapi app after video summarization concludes
 kill $APP_PID
