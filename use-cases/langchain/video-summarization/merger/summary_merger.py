@@ -36,9 +36,9 @@ class SummaryMerger:
             # apply dynamic quantization for activations
             ov_config = {"PERFORMANCE_HINT": "LATENCY",
                          "NUM_STREAMS": "1",
-                         "CACHE_DIR": "ov_llama_cache",
-                         "KV_CACHE_PRECISION": "u8",
-                         "DYNAMIC_QUANTIZATION_GROUP_SIZE": "32",
+                         "CACHE_DIR": "cache\ov_llama_cache",
+                         # "KV_CACHE_PRECISION": "u8",
+                         # "DYNAMIC_QUANTIZATION_GROUP_SIZE": "32",
                          }
             # use langchain openVINO pipeline to load the model
             self.ov_llm = HuggingFacePipeline.from_model_id(
@@ -144,5 +144,3 @@ class SummaryMerger:
         if match:
             return float(match.group(1)) if match.group(1) else 0.0
         return 0.0
-
-    
