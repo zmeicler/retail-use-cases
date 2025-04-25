@@ -7,8 +7,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from pydantic import BaseModel, Field
 import json
-
-from utils import post_request, is_valid_rtsp_url, load_chunk_metadata, all_chunks_exist, extract_timestamp_from_chunk
+import threading
+from MultiRTSPChunkLoader import MultiRTSPChunkLoader
+from utils import post_request, is_valid_rtsp_url, load_chunk_metadata, all_metadata_written, extract_timestamp_from_chunk
 
 class SummarizerConfig(BaseModel):
     rtsp_sources: list[str]
@@ -21,6 +22,7 @@ class SummarizerConfig(BaseModel):
     anomaly_threshold: float = Field(default=0.7, ge=0.0, le=1.0, description="Threshold for anomaly detection.")
     merge_cadence: int = Field(default=60, ge=1, description="Cadence (in seconds) to merge summaries.")
     use_merger: bool = Field(default=True, description="Whether to use the merger/vertex for overall summaries.")
+    merge_cadence_mode: str = Field(default="real_time", description="Mode for merge cadence: 'real_time' or 'timestamp'.")
 
 class VideoSummarizer:
     def __init__(self, config: SummarizerConfig):
@@ -29,17 +31,17 @@ class VideoSummarizer:
         # Initialize RTSP Feeds (Doesn't need to be a call to endpoint. Initilize it here, call lazy_load in a thread))
         self.rtsp_sources = {f"cam{str(i+1).zfill(2)}": source for i, source in enumerate(config.rtsp_sources)}
         self.validate_sources()
-        self.chunk_loader_params = {
-            "camera_sources": self.rtsp_sources,
-            "chunk_type": "sliding_window",
-            "chunk_args": {
-                "window_size": config.chunk_duration * config.framerate,
-                "fps": config.framerate,
-                "overlap": config.chunk_overlap * config.framerate,
-            },
-            "output_dir": config.chunk_dir,
-        }
-        post_request(self.chunk_loader_params, endpoint="start_chunk_loader")
+        self.chunk_loader_params = {"window_size": config.chunk_duration * config.framerate,
+                                "fps": config.framerate,
+                                "overlap": config.chunk_overlap * config.framerate}
+        self.loader = MultiRTSPChunkLoader(
+            camera_sources=self.rtsp_sources,
+            chunk_type="sliding_window",
+            chunk_args=self.chunk_loader_params,
+            output_dir=config.chunk_dir)
+
+        # Run lazy_load in a separate thread
+        threading.Thread(target=self.loader.lazy_load, daemon=True).start()
 
         # Set up variables for video summarization and anomaly detection
         self.cloud_prompt = (
@@ -59,7 +61,7 @@ class VideoSummarizer:
 
     def generate_chunk_summary(self, file, timestamp):
         for camera_id in self.rtsp_sources.keys():
-            # Load metadata
+            # Load metadata (May want to refactor this to be returned in summarize when we check for metadata existance)
             camera_dir = os.path.join(self.config.chunk_dir, camera_id)
             metadata_file_path = os.path.join(camera_dir, f"{camera_id}_metadata.json")
             doc = load_chunk_metadata(metadata_file_path, os.path.join(camera_dir, file), camera_id)
@@ -72,7 +74,7 @@ class VideoSummarizer:
 
             # Update storage (TO DO: Milvis integration)
             start_time = datetime.strptime(doc.metadata["timestamp"], "%Y-%m-%d_%H-%M-%S")
-            chunk_args = self.chunk_loader_params["chunk_args"]
+            chunk_args = self.chunk_loader_params #["chunk_args"]
             window_size = chunk_args["window_size"]
             fps = chunk_args["fps"]
             end_time = start_time + timedelta(seconds=window_size / fps)
@@ -84,7 +86,6 @@ class VideoSummarizer:
 
     def generate_overall_summary(self):
         # Generate overall summary from available chunk summaries
-        overall_start_time = time.time()
         with ThreadPoolExecutor() as pool:
             future = pool.submit(post_request, 
                             {key: value["summary"] for key, value in self.chunk_summaries.items()})
@@ -139,41 +140,52 @@ class VideoSummarizer:
             if chunks:
                 oldest_chunk = min(chunks, key=lambda f: datetime.strptime(extract_timestamp_from_chunk(f), "%Y-%m-%d_%H-%M-%S"))
 
-                # If we have all chunks for this timestamp, process them
+                # If metadata for all chunks for this timestamp has been written, process them
                 timestamp = extract_timestamp_from_chunk(oldest_chunk)
-                if all_chunks_exist(timestamp, self.rtsp_sources, self.config.chunk_dir):
+                if all_metadata_written(timestamp, self.rtsp_sources, self.config.chunk_dir):
                     self.generate_chunk_summary(oldest_chunk, timestamp)
 
             # Call generate_overall_summary at the specified cadence
             if self.config.use_merger:
+                # Use real time for keeping track of the last merge time, if asked
                 current_time = time.time()
-                if current_time - self.last_merge_time >= self.config.merge_cadence and self.chunk_summaries:
-                    # Generate overall summary and anomaly score
-                    res = self.generate_overall_summary()
-                    self.last_merge_time = current_time
+                if self.config.merge_cadence_mode == "real_time":
+                    if current_time - self.last_merge_time >= self.config.merge_cadence and self.chunk_summaries:
+                        self.last_merge_time = current_time
+                        res = self.generate_overall_summary()
 
-                    # Determine start and end times for the overall summary
-                    oldest_chunk_start_time = min(
-                        summary["start_time"] for summary in self.chunk_summaries.values()
-                    )
-                    newest_chunk_end_time = max(
-                        summary["end_time"] for summary in self.chunk_summaries.values()
-                    )
+                # Use timestamp for keeping track of the last merge time, if asked
+                elif self.config.merge_cadence_mode == "timestamp":
+                    if self.chunk_summaries:
+                        newest_chunk_end_time = max(
+                            summary["end_time"] for summary in self.chunk_summaries.values()
+                        )
+                        if (newest_chunk_end_time - datetime.fromtimestamp(self.last_merge_time)).total_seconds() >= self.config.merge_cadence:
+                            self.last_merge_time = newest_chunk_end_time.timestamp()
+                            res = self.generate_overall_summary()
 
-                    # Write to JSON file
-                    json_output = {
-                        "start_time": oldest_chunk_start_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "end_time": newest_chunk_end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "summary": res.get("overall_summary", ""),
-                        "anomaly_score": res.get("anomaly_score", 0.0)
-                    }
-                    json_file_path = self.config.outfile
-                    with open(json_file_path, "a") as json_file:
-                        json.dump(json_output, json_file, indent=4)
-                        json_file.write("\n")
+                # Determine start and end times for the overall summary
+                oldest_chunk_start_time = min(
+                    summary["start_time"] for summary in self.chunk_summaries.values()
+                )
+                newest_chunk_end_time = max(
+                    summary["end_time"] for summary in self.chunk_summaries.values()
+                )
 
-                    # Cleanup processed chunks
-                    self.cleanup_chunks()
+                # Write to JSON file
+                json_output = {
+                    "start_time": oldest_chunk_start_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "end_time": newest_chunk_end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "summary": res.get("overall_summary", ""),
+                    "anomaly_score": res.get("anomaly_score", 0.0)
+                }
+                json_file_path = self.config.outfile
+                with open(json_file_path, "a") as json_file:
+                    json.dump(json_output, json_file, indent=4)
+                    json_file.write("\n")
+
+                # Cleanup processed chunks
+                self.cleanup_chunks()
             else:
                 # Write individual chunk summaries to JSON file
                 for chunk_name, summary in self.chunk_summaries.items():
@@ -203,6 +215,7 @@ if __name__ == "__main__":
     parser.add_argument("-mc", "--merge_cadence", type=int, default=60, help="Cadence (in seconds) to merge summaries.")
     parser.add_argument("-jf", "--json_file", type=str, default="summary_output.json", help="JSON file to append summaries.")
     parser.add_argument("-um", "--use_merger", action="store_true", help="Whether to use the merger/vertex for overall summaries.")
+    parser.add_argument("-mcm", "--merge_cadence_mode", type=str, default="real_time", help="Mode for merge cadence: 'real_time' or 'timestamp'.")
     args = parser.parse_args()
 
     config = SummarizerConfig(
@@ -216,8 +229,25 @@ if __name__ == "__main__":
         anomaly_threshold=args.anomaly_threshold,
         merge_cadence=args.merge_cadence,
         use_merger=args.use_merger,
+        merge_cadence_mode=args.merge_cadence_mode,
     )
 
     # Initialize and run the video summarizer
     summarizer = VideoSummarizer(config)
     summarizer.summarize()
+
+# Goals:
+# 1. Support RTSP streams AND video files
+# 2. Support multiple RTSP Feeds (looking ahead towards DB integration and RAG)
+# 3. Make modular to support a distributed workload (e.g., 80 camera use case)
+# 4. Extend to cloud (eventually streaming)
+# 5. Implement quickly for computex
+# 6. Filter out profanity/toxic conent
+
+# To Do's:
+# 1. Finish support for MultiTRTSP streams: cam 1 & 2 > room A, cam 3 & 4 > room B, etc.
+# 2. Gabe's fastAPI scheme / langchain integrations
+# 2. Place merger and vertex wrapper in parallel
+# 3. Integrate Bharath's vertex streaming
+# 3. Add object detection which could trigger local LVM
+# 4. Cross-entropy frame selection for summarization

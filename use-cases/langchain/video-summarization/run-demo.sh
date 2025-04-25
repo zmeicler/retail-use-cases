@@ -26,11 +26,11 @@ Here is a detailed description of the video.
 '
 
 echo "Starting FastAPI app"
-uvicorn api.app:app &
+python .\api\app.py
 APP_PID=$!
 
 echo "Running Video Summarizer"
-python summarizer/video_summarizer.py $INPUT_FILE -p "$PROMPT" -at 0.5 -um
+python summarizer/video_summarizer.py $INPUT_FILE -p "$PROMPT" -um -at 0.2
 
 # terminate fastapi app after video summarization concludes
 kill $APP_PID

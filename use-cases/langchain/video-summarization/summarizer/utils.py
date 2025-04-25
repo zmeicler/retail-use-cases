@@ -57,6 +57,31 @@ def load_chunk_metadata(metadata_file_path: str, chunk_path: str, camera_id: str
                 )
     return None
 
+def all_metadata_written(timestamp, rtsp_sources, chunk_dir):
+    """
+    Check if metadata for all chunks corresponding to the given timestamp has been written.
+    """
+    checks = [False] * len(rtsp_sources)
+    for idx, camera_id in enumerate(rtsp_sources.keys()):
+        # Check to see if metadata file exists
+        camera_dir = os.path.join(chunk_dir, camera_id)
+        metadata_file_path = os.path.join(camera_dir, f"{camera_id}_metadata.json")
+        if not os.path.exists(metadata_file_path):
+            print(f"Metadata file for {camera_id} does not exist: {metadata_file_path}")
+            return False
+        
+        # If so, load it and see if the timestamp exists for this chunk
+        with open(metadata_file_path, "r") as metadata_file:
+            for line in metadata_file:
+                metadata = json.loads(line)
+                if metadata["timestamp"] ==timestamp:
+                    # This camera has metadata for the given timestamp, set check to True
+                    checks[idx] = True
+                    break
+            print(f"Metadata for {camera_id} does not contain timestamp {timestamp}.")
+
+    return all(checks)
+
 def all_chunks_exist(timestamp: str, rtsp_sources: Dict[str, str], chunk_dir: str) -> bool:
     """
     Check if all cameras have the chunk for the given timestamp.
