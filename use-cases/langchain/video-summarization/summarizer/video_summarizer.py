@@ -235,19 +235,3 @@ if __name__ == "__main__":
     # Initialize and run the video summarizer
     summarizer = VideoSummarizer(config)
     summarizer.summarize()
-
-# Goals:
-# 1. Support RTSP streams AND video files
-# 2. Support multiple RTSP Feeds (looking ahead towards DB integration and RAG)
-# 3. Make modular to support a distributed workload (e.g., 80 camera use case)
-# 4. Extend to cloud (eventually streaming)
-# 5. Implement quickly for computex
-# 6. Filter out profanity/toxic conent
-
-# To Do's:
-# 1. Finish support for MultiTRTSP streams: cam 1 & 2 > room A, cam 3 & 4 > room B, etc.
-# 2. Gabe's fastAPI scheme / langchain integrations
-# 2. Place merger and vertex wrapper in parallel
-# 3. Integrate Bharath's vertex streaming
-# 3. Add object detection which could trigger local LVM
-# 4. Cross-entropy frame selection for summarization
